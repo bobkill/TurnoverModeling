@@ -9,111 +9,111 @@ library.Matrix <- library(Matrix)
 library.RODBC <- library(RODBC)
 library.reshape2 <- library(reshape2)
 library.randomForest <- library(randomForest)
-memory.size(max=TRUE)
-
 dbhandle <- odbcDriverConnect('driver={SQL Server};server=104.130.165.170;database=Platform;uid=sa;pwd=Quantum!00')
 uniqueOrgNums <- sqlQuery(dbhandle, 
 	'select distinct
 		OrganizationID 
-	from platform..hireDate_vw hd 
-		join platform..userattribute ua on hd.userid = ua.userid 
-		join platform..users ui on hd.userid = ui.userid'
+	from platform.dbo.DataMLRK2'
 )
+
 
 completeStor <- list()
 for(i in 1:length(uniqueOrgNums$OrganizationID)){
-print(i)
-df <- sqlQuery(dbhandle, 
-	paste("select hd.*,oa.Attribute+'_'+cast(oao.AttributeId as varchar)+'_'+Value+'_'+cast(oao.AttributeOptionId as varchar) as Value from platform..hireDate_vw hd  join platform..userattribute ua on hd.userid = ua.userid join platform..users ui on hd.userid = ui.userid join platform..OrganizationAttributeOption oao on ua.value = oao.OptionValue and ua.AttributeID = oao.AttributeId join platform..organizationattribute oa on oao.attributeid = oa.AttributeID where hd.OrganizationID ="
-,
-uniqueOrgNums$OrganizationID[i]
-)
-)
+	print(i)
+	dfSurvey <- sqlQuery(dbhandle, 
+		paste("select hd.UserID,hd.HireDate,hd.TermDate,DateCreated,cycledate,questionid,surveyRankID,cast(sd.questionid as varchar) + 'BOBSEPARATEHERE' + response as Value from platform..userinfo hd join platform.dbo.DataMLRK2 sd on sd.platformuserid = hd.userid where sd.OrganizationID ="
+	,
+	uniqueOrgNums$OrganizationID[i]
+	,' and cycledate between hiredate and termdate or (organizationid = '
+	,uniqueOrgNums$OrganizationID[i]
+	,'and cycledate > hiredate and termdate is null)'
+	)
+	)
 
-if(nrow(df) > 99){
-iters <- 10
-saveOutput <- list()
+	if(exists('dfSurvey')){
 
-#Do some basic date formatting
-df$HireDate <- as.Date(df$HireDate)
-df$TermDate <- as.Date(ifelse(is.na(df$TermDate),'9999-12-31',as.character(df$TermDate)))
+		if(nrow(dfSurvey) > 0){
 
-#Set some targets
-df$term1 <- ifelse(df$TermDate - df$HireDate < 365,1,0)
-df$term0.5 <- ifelse(df$TermDate - df$HireDate < 180,1,0)
-df$term0.25 <- ifelse(df$TermDate - df$HireDate < 90,1,0)
-df$keep <- ifelse(df$Value %like% '%@%',0,1)
+			uniqueOrgSurveyID2 <- unique(dfSurvey$surveyRankID)#There are probably missing users in attributes
+			uniqueOrgSurveyID <- uniqueOrgSurveyID2[order(uniqueOrgSurveyID2)]
+			uniqueOrgSurveyID <- uniqueOrgSurveyID[length(uniqueOrgSurveyID)-1]
 
-howManyObsPerValue <- aggregate(UserID ~ Value,df,function(x){length(unique(x))})
-keepValues <- howManyObsPerValue[howManyObsPerValue$UserID >= length(unique(df$UserID))*0.01,]
-df <- df[df$keep == 1 & df$Value %in% keepValues$Value,]
-dfTable <- as.data.table(df)
+			df <- dfSurvey[dfSurvey$surveyRankID <= uniqueOrgSurveyID,]
 
-if(nrow(df) > 0){
-widedfTable <- dcast(dfTable,term1 + term0.5 + term0.25 + UserID ~ Value,length)
-widedf <- as.data.frame(widedfTable)
+			if(is.data.frame(df)){
 
-#Function to assign 1 to anything more than 1
+				if(nrow(df) > 99){
 
-just1 <- function(x){
-	a <- ifelse(x > 0,1,0)
-	return(a)
-}
+					#Do some basic date formatting
+					df$HireDate <- as.Date(df$HireDate)
+					df$TermDate <- as.Date(ifelse(is.na(df$TermDate),'9999-12-31',as.character(df$TermDate)))
 
 
-widedf[,4:ncol(widedf)] <- apply(widedf[,4:ncol(widedf)],2,just1)
-colnames(widedf) <- paste('v',colnames(widedf),sep='')
-colnames(widedf) <- gsub(pattern=' ',replacement='',colnames(widedf))
-colnames(widedf) <- gsub(pattern='[[:punct:][_]]',replacement='',colnames(widedf))
-colnames(widedf) <- gsub(pattern='[^[:alnum:][_] ]',replacement='',colnames(widedf))
-colnames(widedf) <- gsub(pattern='/',replacement='',colnames(widedf))
-df2 <- widedf[,c(1,5:ncol(widedf))]
+					#Set some targets
+					df$term1 <- ifelse(df$TermDate - max(as.Date(df$cycledate)) < 365,1,0)
+					df$term0.5 <- ifelse(df$TermDate - max(as.Date(df$cycledate)) < 180,1,0)
+					df$term0.25 <- ifelse(df$TermDate - max(as.Date(df$cycledate)) < 90,1,0)
+					df$keep <- ifelse(df$Value %like% '%@%',0,1)
 
-if(sum(df2$vterm1) > 10){
-startTime <- Sys.time()
-importanceListFinal <- list()
-modelResults <- list()
+					#Omit variables that aren't present for at least 5% of the population
+					howManyObsPerValue <- aggregate(UserID ~ Value,df,function(x){length(unique(x))})
+					keepValues <- howManyObsPerValue[howManyObsPerValue$UserID >= length(unique(df$UserID))*0.05,]
+					df <- df[df$keep == 1 & df$Value %in% keepValues$Value,]
+					dfTable <- as.data.table(df)
 
-	for(j in 1:iters){
-		gc()
-		smp_size <- floor(0.8 * nrow(df2))
-		train_ind <- sample(seq_len(nrow(df2)), size = smp_size)
-		train <- df2[train_ind,]
-	#up sample the turnovers in train
-
-		trainUp <- train[train$vterm1 ==1,]
-		numReplicates <- round(nrow(train)/nrow(trainUp))
-		trainUpRep <- do.call(rbind, replicate(numReplicates, trainUp, simplify = FALSE))
-		train <- rbind(train,trainUpRep)
-		test <- df2[-train_ind, ]
-		print(j)
-		rf <- randomForest(as.factor(vterm1) ~ .,data=train,ntree=50)
-		preds <- predict(rf,newdata=test)
-
-		importanceList = data.frame(var = colnames(df2[,2:ncol(df2)]),importance(rf))
-		importanceListFinal[[j]] <- importanceList
-		modelResults[[j]] <- data.frame(j,table(prediction = preds,actual=test$vterm1))
-	}
-endTime <- Sys.time()
-importanceListFinalUnlist <- do.call(rbind.data.frame,importanceListFinal)
-avgVarImportance <- aggregate(MeanDecreaseGini ~ var,data=importanceListFinalUnlist,mean)
-avgVarImportanceOrder <- avgVarImportance[order(-avgVarImportance$MeanDecreaseGini),]
-
-modelResultsUnlist <- do.call(rbind.data.frame,modelResults)
-modelResultsFinal <- aggregate(Freq ~ prediction + actual,data=modelResultsUnlist ,sum)
-modelResultsFinal$AvgFreq <- modelResultsFinal$Freq/iters
-completeStor[[i]] <- list(uniqueOrgNums$OrganizationID[i],avgVarImportanceOrder[1:20,],modelResultsFinal,startTime,endTime)
-rm(list=setdiff(ls(), c('i','dbhandle','uniqueOrgNums','completeStor','library.data.table','library.DescTools','library.Matrix','library.RODBC','library.reshape2','library.randomForest')))
-save(completeStor,file='C:/Users/BobKill/OneDrive - Quantum Workplace/Turnover/Calculate turnover/completeStorV3.RData')
-gc()
-}
-}
-}
-}
-
-save(completeStor,file='C:/Users/BobKill/OneDrive - Quantum Workplace/Turnover/Calculate turnover/completeStorV3.RData')
+					if(nrow(df) > 0){
+						widedfTable <- dcast(dfTable,term1 + term0.5 + term0.25 + UserID ~ Value,length)
+						widedf <- as.data.frame(widedfTable)
 
 
-completeStor
+						colnames(widedf) <- paste('v',colnames(widedf),sep='')
+						colnames(widedf) <- gsub(pattern=' ',replacement='',colnames(widedf))
+						colnames(widedf) <- gsub(pattern='[[:punct:]]',replacement='',colnames(widedf))
+						colnames(widedf) <- gsub(pattern='-',replacement='',colnames(widedf))
+						colnames(widedf) <- gsub(pattern='[^[:alnum:]]',replacement='',colnames(widedf))
+						colnames(widedf) <- gsub(pattern='/',replacement='',colnames(widedf))
+						df2 <- widedf[,c(1,5:ncol(widedf))]
+
+						if(sum(df2$vterm1) > 15){
+
+							#Remove cross-validation, since out-of-bag approximates it
+							#Upsample the turnovers, at the expense of gaining some false positives
+
+							trainUp <- df2[df2$vterm1 ==1,]
+							numReplicates <- round((nrow(df2)/nrow(trainUp))/2)
+							trainUpRep <- do.call(rbind, replicate(numReplicates, trainUp, simplify = FALSE))
+							train <- rbind(df2,trainUpRep)
+
+							#Fit the randomForest model
+							rf <- randomForest(as.factor(vterm1) ~ .,data=train,ntree=150)
+							preds <- predict(rf,newdata=df2)
+							importanceList = data.frame(var = colnames(df2[,2:ncol(df2)]),importance(rf))
+							importanceListFinal <- importanceList
+
+							modelResults <- table(prediction = preds,actual=df2$vterm1)
+
+							importanceListFinalUnlist <- importanceListFinal
+							avgVarImportance <- aggregate(MeanDecreaseGini ~ var,data=importanceListFinalUnlist,mean)
+							avgVarImportanceOrder <- avgVarImportance[order(-avgVarImportance$MeanDecreaseGini),]
+
+							modelResultsUnlist <- modelResults
+							modelResultsFinal <- aggregate(Freq ~ prediction + actual,data=modelResultsUnlist,sum)
+							modelResultsFinal$AvgFreq <- modelResultsFinal$Freq/iters
+
+							save(rf,file=paste('C:/Users/BobKill/OneDrive - Quantum Workplace/Turnover/Calculate turnover/ClientModels/',uniqueOrgNums$OrganizationID[i],'_',uniqueOrgSurveyID,'mod','.RData',sep=''))
+						}#End of if(sum(df2$vterm1) > 29)
+					}#End of if(nrow(df) > 0)
+				}#End of if(nrow(df) > 99)
+			}#End of if(is.data.frame('df'))
+			if(exists('avgVarImportanceOrder')){
+				completeStorTemp <- list(uniqueOrgNums$OrganizationID[i],uniqueOrgSurveyID,avgVarImportanceOrder[1:20,],modelResultsFinal)
+				completeStor <- c(completeStor,completeStorTemp)
+				save(completeStor,file='C:/Users/BobKill/OneDrive - Quantum Workplace/Turnover/Calculate turnover/completeStorV9.RData')
+			}#End of if(exists('avgVarImportanceOrder'))
+			gc()
+			rm(list=setdiff(ls(), c('i','dbhandle','uniqueOrgNums','completeStor','library.data.table','library.DescTools','library.Matrix','library.RODBC','library.reshape2','library.randomForest')))
+			}#end of if(nrow(dfSurvey) > 0){
+	}#End of if(exists('dfSurvey')){
+}#End of for(i in 1:length(uniqueOrgNums$OrganizationID))
 
 
