@@ -1,21 +1,39 @@
-#install.packages('RODBC')
-#install.packages('reshape2')
-#install.packages('randomForest')
-#install.packages('data.table')
-#install.packages('DescTools')
-library.data.table <- library(data.table)
-library.DescTools <- library(DescTools)
-library.Matrix <- library(Matrix)
-library.RODBC <- library(RODBC)
-library.reshape2 <- library(reshape2)
-library.randomForest <- library(randomForest)
-dbhandle <- odbcDriverConnect('driver={SQL Server};server=104.130.165.170;database=Platform;uid=sa;pwd=Quantum!00')
-uniqueOrgNums <- sqlQuery(dbhandle, 
+library.data.table <- require(data.table)
+library.DescTools <- require(DescTools)
+library.Matrix <- require(Matrix)
+library.RODBC <- require(RODBC)
+library.reshape2 <- require(reshape2)
+library.randomForest <- require(randomForest)
+
+'driver={SQL Server};server=104.130.165.170;database=Platform;uid=sa;pwd=Quantum!00'
+myOrgNums <- sqlQuery(dbhandle, 
 	'select distinct
 		OrganizationID 
 	from platform.dbo.DataMLRK2'
 )
 
+
+
+clientSpecificModeler(
+dbServer='104.130.165.170',
+db='Platform',
+dbUsername='sa',
+dbPassword='Quantum!00',
+listOrgNums = myOrgNums,
+initialRecordsRequired = 99,
+trees = 150
+#proportionRecordsPerVariableRequired= 0.05
+)
+
+
+
+clientSpecificModeler <- function(dbServer,db,dbUsername,dbPassword,listOrgNums,initialRecordsRequired,trees)
+{
+
+odbcConnectString <- paste('driver={SQL Server}',';server=',dbServer,';database=',db,';uid=',dbUsername,';pwd=',dbPassword,sep='')
+dbhandle <- odbcDriverConnect(odbcConnectString)
+
+uniqueOrgNums <- listOrgNums
 
 completeStor <- list()
 for(i in 1:length(uniqueOrgNums$OrganizationID)){
@@ -36,13 +54,13 @@ for(i in 1:length(uniqueOrgNums$OrganizationID)){
 
 			uniqueOrgSurveyID2 <- unique(dfSurvey$surveyRankID)#There are probably missing users in attributes
 			uniqueOrgSurveyID <- uniqueOrgSurveyID2[order(uniqueOrgSurveyID2)]
-			uniqueOrgSurveyID <- uniqueOrgSurveyID[length(uniqueOrgSurveyID)-1]
+			uniqueOrgSurveyID <- uniqueOrgSurveyID[length(uniqueOrgSurveyID)]
 
 			df <- dfSurvey[dfSurvey$surveyRankID <= uniqueOrgSurveyID,]
 
 			if(is.data.frame(df)){
 
-				if(nrow(df) > 99){
+				if(nrow(df) > initialRecordsRequired){
 
 					#Do some basic date formatting
 					df$HireDate <- as.Date(df$HireDate)
@@ -55,9 +73,9 @@ for(i in 1:length(uniqueOrgNums$OrganizationID)){
 					df$term0.25 <- ifelse(df$TermDate - max(as.Date(df$cycledate)) < 90,1,0)
 					df$keep <- ifelse(df$Value %like% '%@%',0,1)
 
-					#Omit variables that aren't present for at least 5% of the population
+					#Omit variables that aren't present for at least x% of the population
 					howManyObsPerValue <- aggregate(UserID ~ Value,df,function(x){length(unique(x))})
-					keepValues <- howManyObsPerValue[howManyObsPerValue$UserID >= length(unique(df$UserID))*0.05,]
+					keepValues <- howManyObsPerValue[howManyObsPerValue$UserID >= length(unique(df$UserID)) * 0.05,]
 					df <- df[df$keep == 1 & df$Value %in% keepValues$Value,]
 					dfTable <- as.data.table(df)
 
@@ -85,7 +103,7 @@ for(i in 1:length(uniqueOrgNums$OrganizationID)){
 							train <- rbind(df2,trainUpRep)
 
 							#Fit the randomForest model
-							rf <- randomForest(as.factor(vterm1) ~ .,data=train,ntree=150)
+							rf <- randomForest(as.factor(vterm1) ~ .,data=train,ntree = 150)
 							preds <- predict(rf,newdata=df2)
 							importanceList = data.frame(var = colnames(df2[,2:ncol(df2)]),importance(rf))
 							importanceListFinal <- importanceList
@@ -98,7 +116,7 @@ for(i in 1:length(uniqueOrgNums$OrganizationID)){
 
 							modelResultsUnlist <- modelResults
 							modelResultsFinal <- aggregate(Freq ~ prediction + actual,data=modelResultsUnlist,sum)
-							modelResultsFinal$AvgFreq <- modelResultsFinal$Freq/iters
+							modelResultsFinal$AvgFreq <- modelResultsFinal$Freq
 
 							save(rf,file=paste('C:/Users/BobKill/OneDrive - Quantum Workplace/Turnover/Calculate turnover/ClientModels/',uniqueOrgNums$OrganizationID[i],'_',uniqueOrgSurveyID,'mod','.RData',sep=''))
 						}#End of if(sum(df2$vterm1) > 29)
@@ -115,5 +133,10 @@ for(i in 1:length(uniqueOrgNums$OrganizationID)){
 			}#end of if(nrow(dfSurvey) > 0){
 	}#End of if(exists('dfSurvey')){
 }#End of for(i in 1:length(uniqueOrgNums$OrganizationID))
+
+
+
+
+}
 
 
